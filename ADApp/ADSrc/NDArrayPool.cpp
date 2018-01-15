@@ -69,20 +69,24 @@ NDArray* NDArrayPool::alloc(int ndims, size_t *dims, NDDataType_t dataType, size
   epicsMutexLock(listLock_);
 
   /* Find a free image */
-  pArray = (NDArray *)ellFirst(&freeList_);
+  NDArray* freeArray = (NDArray *)ellFirst(&freeList_);
 
-  if (!pArray) {
-    /* We did not find a free image.
-     * Allocate a new one if we have not exceeded the limit */
-    if ((maxBuffers_ > 0) && (numBuffers_ >= maxBuffers_)) {
-      printf("%s: error: reached limit of %d buffers (memory use=%ld/%ld bytes)\n",
-             functionName, maxBuffers_, (long)memorySize_, (long)maxMemory_);
-    } else {
-      numBuffers_++;
-      pArray = new NDArray;
-      ellAdd(&freeList_, &pArray->node);
-      numFree_++;
-    }
+  if (freeArray) {
+	  pArray = new NDArray;
+  }
+  else
+  {
+	  /* We did not find a free image. */
+	  /* Allocate a new one if we have not exceeded the limit */
+	  if ((maxBuffers_ > 0) && (numBuffers_ >= maxBuffers_)) {
+		  printf("%s: error: reached limit of %d buffers (memory use=%ld/%ld bytes)\n",
+				  functionName, maxBuffers_, (long)memorySize_, (long)maxMemory_);
+	  } else {
+		  numBuffers_++;
+		  pArray = new NDArray;
+		  ellAdd(&freeList_, &pArray->node);
+		  numFree_++;
+	  }
   }
 
   if (pArray) {
@@ -100,6 +104,7 @@ NDArray* NDArrayPool::alloc(int ndims, size_t *dims, NDDataType_t dataType, size
     }
     /* Erase the attributes if that global flag is set */
     if (eraseNDAttributes) pArray->pAttributeList->clear();
+    /* calcs totalBytes */
     pArray->getInfo(&arrayInfo);
     if (dataSize == 0) dataSize = arrayInfo.totalBytes;
     if (arrayInfo.totalBytes > dataSize) {
@@ -109,53 +114,98 @@ NDArray* NDArrayPool::alloc(int ndims, size_t *dims, NDDataType_t dataType, size
     }
   }
 
+  if (freeArray && pArray) {
+	  delete pArray;
+
+	  pArray = freeArray;
+	  NDArray* nextArray = (NDArray *)ellNext(&freeArray->node);
+	  size_t diffSize;
+	  if (pArray->dataSize > dataSize) {
+		  diffSize = pArray->dataSize - dataSize;
+	  } else {
+		  diffSize = dataSize - pArray->dataSize;
+	  }
+	  while(nextArray) {
+		  size_t ndiffSize;
+		  if (nextArray->dataSize > dataSize) {
+			  ndiffSize = nextArray->dataSize - dataSize;
+		  } else {
+			  ndiffSize = dataSize - nextArray->dataSize;
+		  }
+		  if(ndiffSize < diffSize) {
+			  diffSize = ndiffSize;
+			  pArray = nextArray;
+		  }
+		  nextArray = (NDArray *)ellNext(&nextArray->node);
+	  }
+
+	  pArray->pNDArrayPool = this;
+	  pArray->dataType = dataType;
+	  pArray->ndims = ndims;
+	  memset(pArray->dims, 0, sizeof(pArray->dims));
+	  for (i=0; i<ndims && i<ND_ARRAY_MAX_DIMS; i++) {
+		  pArray->dims[i].size = dims[i];
+		  pArray->dims[i].offset = 0;
+		  pArray->dims[i].binning = 1;
+		  pArray->dims[i].reverse = 0;
+	  }
+	  /* Erase the attributes if that global flag is set */
+	  if (eraseNDAttributes) pArray->pAttributeList->clear();
+  }
+
   if (pArray) {
-    /* If the caller passed a valid buffer use that, trust that its size is correct */
-    if (pData) {
-      pArray->pData = pData;
-    } else {
-      /* See if the current buffer is big enough */
-      if (pArray->dataSize < dataSize) {
-        /* No, we need to free the current buffer and allocate a new one */
-        /* See if there is enough room */
-        if (pArray->pData) {
-          memorySize_ -= pArray->dataSize;
-          free(pArray->pData);
-          pArray->pData = NULL;
-          pArray->dataSize = 0;
-        }
-        if ((maxMemory_ > 0) && ((memorySize_ + dataSize) > maxMemory_)) {
-          // We don't have enough memory to allocate the array
-          // See if we can get memory by deleting arrays
-          NDArray *freeArray = (NDArray *)ellFirst(&freeList_);
-          while (freeArray && ((memorySize_ + dataSize) > maxMemory_)) {
-            if (freeArray->pData) {
-              memorySize_ -= freeArray->dataSize;
-              free(freeArray->pData);
-              freeArray->pData = NULL;
-              freeArray->dataSize = 0;
-            }
-            // Next array
-            freeArray = (NDArray *)ellNext(&freeArray->node);
-          }
-        }
-        if ((maxMemory_ > 0) && ((memorySize_ + dataSize) > maxMemory_)) {
-          printf("%s: error: reached limit of %ld memory (%d/%d buffers)\n",
-                 functionName, (long)maxMemory_, numBuffers_, maxBuffers_);
-          pArray = NULL;
-        } else {
-          pArray->pData = malloc(dataSize);
-          if (pArray->pData) {
-            pArray->dataSize = dataSize;
-            memorySize_ += dataSize;
-          } else {
-            pArray = NULL;
-          }
-        }
-      }
-    }
-    // If we don't have a valid memory buffer see pArray to NULL to indicate error
-    if (pArray && (pArray->pData == NULL)) pArray = NULL;
+	  /* If the caller passed a valid buffer use that, trust that its size is correct */
+	  if (pData) {
+		  pArray->pData = pData;
+	  } else {
+		  /* See if the current buffer is big enough */
+		  if (pArray->pData) {
+
+			  size_t thresholdSize = dataSize + dataSize / 2;
+			  thresholdSize = (thresholdSize < dataSize) ? dataSize : thresholdSize;
+
+			  if ((pArray->dataSize < dataSize) || (pArray->dataSize > thresholdSize)) {
+			  /* No, we need to free the current buffer and allocate a new one */
+			  /* See if there is enough room */
+				  memorySize_ -= pArray->dataSize;
+				  free(pArray->pData);
+				  pArray->pData = NULL;
+				  pArray->dataSize = 0;
+			  }
+		  }
+		  if (!pArray->pData) {
+			  if ((maxMemory_ > 0) && ((memorySize_ + dataSize) > maxMemory_)) {
+				  /* We don't have enough memory to allocate the array */
+				  /* See if we can get memory by deleting arrays */
+				  NDArray *freeArray = (NDArray *)ellFirst(&freeList_);
+				  while (freeArray && ((memorySize_ + dataSize) > maxMemory_)) {
+					  if (freeArray->pData) {
+						  memorySize_ -= freeArray->dataSize;
+						  free(freeArray->pData);
+						  freeArray->pData = NULL;
+						  freeArray->dataSize = 0;
+					  }
+					  /* Next array */
+					  freeArray = (NDArray *)ellNext(&freeArray->node);
+				  }
+			  }
+			  if ((maxMemory_ > 0) && ((memorySize_ + dataSize) > maxMemory_)) {
+				  printf("%s: error: reached limit of %ld memory (%d/%d buffers)\n",
+						  functionName, (long)maxMemory_, numBuffers_, maxBuffers_);
+				  pArray = NULL;
+			  } else {
+				  pArray->pData = malloc(dataSize);
+				  if (pArray->pData) {
+					  pArray->dataSize = dataSize;
+					  memorySize_ += dataSize;
+				  } else {
+					  pArray = NULL;
+				  }
+			  }
+		  }
+	  }
+	  /* If we don't have a valid memory buffer see pArray to NULL to indicate error */
+	  if (pArray && (pArray->pData == NULL)) pArray = NULL;
   }
   if (pArray) {
     /* Set the reference count to 1, remove from free list */
@@ -644,7 +694,18 @@ int NDArrayPool::report(FILE *fp, int details)
         (long)memorySize_, (long)maxMemory_);
   fprintf(fp, "  numFree=%d\n",
          numFree_);
-      
+  if(details > 0)
+  {
+    NDArray* freeArray = (NDArray *)ellFirst(&freeList_);
+    unsigned i = 0;
+    while(freeArray)
+    {
+      fprintf(fp, "Free Array %d:\n", i);
+      freeArray->report(fp, details);
+      freeArray = (NDArray *)ellNext(&freeArray->node);
+      i++;
+    }
+  }
   return ND_SUCCESS;
 }
 
